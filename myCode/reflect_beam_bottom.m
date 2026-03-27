@@ -3,6 +3,15 @@ function yOut = reflect_beam_bottom(yIn, hit, config)
 % State:
 %   y = [r; z; pr; pz; Re(P); Im(P); Re(Q); Im(Q); tau; Re(G); Im(G)]
 
+% 优化：缓存曲率修正系数及平面波反射标志，消除每次反射的多级字段访问和 isfield/strcmpi 检查
+% 切换 config 时可调用 clear reflect_beam_bottom 重置缓存
+persistent cachedCurvFactor cachedPlaneWave
+if isempty(cachedCurvFactor)
+    cachedCurvFactor = config.beam.model.curvature_factor;
+    cachedPlaneWave  = isfield(config.boundary.bottom, 'reflection') && ...
+        strcmpi(config.boundary.bottom.reflection, 'plane_wave');
+end
+
 r   = hit.rHit;
 z   = hit.zHit;
 
@@ -49,14 +58,13 @@ end
 RM = Tg / Th;
 RN = 2.0 * kappa / (cw^2 * Th);
 RN = RN + RM * (2.0 * cnjump - RM * csjump) / cw;
-RN = config.beam.model.curvature_factor * RN;
+RN = cachedCurvFactor * RN;
 
 PNew = P + Q * RN;
 QNew = Q;
 
 Rbot = 1.0 + 0.0i;
-if isfield(config.boundary.bottom, 'reflection') && ...
-        strcmpi(config.boundary.bottom.reflection, 'plane_wave')
+if cachedPlaneWave
     hitLocal = hit;
     hitLocal.nBdry = nB;
     hitLocal.tBdry = tB;

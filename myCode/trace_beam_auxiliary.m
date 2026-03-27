@@ -285,8 +285,14 @@ yPred(2) = y(2) + dzds * dsMax;
 zTol = 1e-12 * max(1.0, abs(y(2)));
 sTol = 1.0e-14 * max(1.0, dsMax);
 
-if isfield(config, 'boundary') && isfield(config.boundary, 'surface') ...
-        && config.boundary.surface.enabled
+% 优化：缓存海面边界启用标志，消除每步 isfield 检查
+persistent surfaceEnabled
+if isempty(surfaceEnabled)
+    surfaceEnabled = isfield(config, 'boundary') && isfield(config.boundary, 'surface') ...
+        && config.boundary.surface.enabled;
+end
+
+if surfaceEnabled
 
     if (y(2) > zTol) && (dzds < -sTol)
         dsSurf = -y(2) / dzds;
@@ -318,20 +324,29 @@ end
 end
 
 function hit = local_find_ssp_interface_hit(y, dsMax, config, c0)
+% 优化：缓存运行期间不变的标志、层界面深度数组、容差，
+% 消除每步重复的 isfield/strcmpi 检查与 zw(2:end-1) 切片。
+persistent sspScanEnabled cachedInternalZ cachedZw cachedEventTol
+
+if isempty(sspScanEnabled)
+    zw0 = config.env.profile.zw(:);
+    sspScanEnabled = local_ssp_jump_enabled(config) && ...
+        strcmpi(config.env.profile.type, 'tabular') && ...
+        strcmpi(local_get_tabular_mode(config), 'piecewise_linear') && ...
+        numel(zw0) >= 3;
+    if sspScanEnabled
+        cachedZw        = zw0;
+        cachedInternalZ = zw0(2:end-1);
+        cachedEventTol  = local_ssp_event_tol(config);
+    else
+        cachedZw        = [];
+        cachedInternalZ = [];
+        cachedEventTol  = 1.0e-10;
+    end
+end
+
 hit = local_empty_ssp_hit();
-
-if ~local_ssp_jump_enabled(config)
-    return;
-end
-if ~strcmpi(config.env.profile.type, 'tabular')
-    return;
-end
-if ~strcmpi(local_get_tabular_mode(config), 'piecewise_linear')
-    return;
-end
-
-zw = config.env.profile.zw(:);
-if numel(zw) < 3
+if ~sspScanEnabled
     return;
 end
 
@@ -344,9 +359,9 @@ if abs(dzds) < 1.0e-14 * max(1.0, dsMax)
 end
 
 z0 = y(2);
-internalZ = zw(2:end-1);
+internalZ = cachedInternalZ;
 
-zTol = local_ssp_event_tol(config) * max(1.0, max(abs([z0; internalZ])));
+zTol = cachedEventTol * max(1.0, max(abs([z0; internalZ])));
 sTol = 1.0e-14 * max(1.0, dsMax);
 
 if dzds > 0
@@ -368,7 +383,7 @@ if ~(dsIf > sTol && dsIf <= dsMax + sTol)
     return;
 end
 
-j = find(abs(zw - zIf) <= zTol, 1, 'first');
+j = find(abs(cachedZw - zIf) <= zTol, 1, 'first');
 if isempty(j)
     return;
 end
@@ -380,23 +395,33 @@ hit.interfaceIndex = j;
 end
 
 function hit = local_empty_bottom_hit()
-hit = struct( ...
-    'exists', false, ...
-    'rHit',   nan, ...
-    'zHit',   nan, ...
-    'segId',  nan, ...
-    'dsHit',  inf, ...
-    'nBdry',  [], ...
-    'tBdry',  [], ...
-    'kappa',  [] );
+% 优化：persistent 模板替代每步现场构造，消除重复字段分配
+persistent tmpl
+if isempty(tmpl)
+    tmpl = struct( ...
+        'exists', false, ...
+        'rHit',   nan, ...
+        'zHit',   nan, ...
+        'segId',  nan, ...
+        'dsHit',  inf, ...
+        'nBdry',  [], ...
+        'tBdry',  [], ...
+        'kappa',  [] );
+end
+hit = tmpl;
 end
 
 function hit = local_empty_ssp_hit()
-hit = struct( ...
-    'exists', false, ...
-    'dsHit', inf, ...
-    'zHit', nan, ...
-    'interfaceIndex', nan );
+% 优化：persistent 模板替代每步现场构造，消除重复字段分配
+persistent tmpl
+if isempty(tmpl)
+    tmpl = struct( ...
+        'exists', false, ...
+        'dsHit', inf, ...
+        'zHit', nan, ...
+        'interfaceIndex', nan );
+end
+hit = tmpl;
 end
 
 function tf = local_ssp_jump_enabled(config)

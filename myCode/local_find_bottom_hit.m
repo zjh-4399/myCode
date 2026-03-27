@@ -20,26 +20,38 @@ function hit = local_find_bottom_hit(y, yTry, ds_left, config)
 %   hit.tBdry  : boundary tangent at hit point (filled by attach_bottom_normal)
 %   hit.kappa  : boundary curvature at hit point (filled by attach_bottom_normal)
 
-    hit = struct( ...
-        'exists', false, ...
-        'rHit',   nan, ...
-        'zHit',   nan, ...
-        'segId',  nan, ...
-        'dsHit',  inf, ...
-        'nBdry',  [], ...
-        'tBdry',  [], ...
-        'kappa',  [] );
-
-    % -------------------------------------------------------------
-    % Basic guards
-    % -------------------------------------------------------------
-    if ~isfield(config, 'boundary') || ~isfield(config.boundary, 'bottom') || ...
-            ~config.boundary.bottom.enabled
-        return;
+    % 优化：用 persistent 模板替代每次现场构造命中结构体，消除重复的字段分配开销
+    % 切换 config 时可调用 clear local_find_bottom_hit 重置缓存
+    persistent bottomEnabled cachedBottom cachedNSeg emptyHit
+    if isempty(bottomEnabled)
+        bottomEnabled = isfield(config, 'boundary') && isfield(config.boundary, 'bottom') ...
+            && config.boundary.bottom.enabled ...
+            && isfield(config, 'bottom') && ~isempty(config.bottom) ...
+            && isfield(config.bottom, 'r') && isfield(config.bottom, 'z');
+        if bottomEnabled
+            cachedBottom = config.bottom;
+            cachedNSeg   = numel(config.bottom.r) - 1;
+            if cachedNSeg < 1
+                bottomEnabled = false;
+                cachedBottom  = [];
+                cachedNSeg    = 0;
+            end
+        else
+            cachedBottom = [];
+            cachedNSeg   = 0;
+        end
+        emptyHit = struct( ...
+            'exists', false, ...
+            'rHit',   nan, ...
+            'zHit',   nan, ...
+            'segId',  nan, ...
+            'dsHit',  inf, ...
+            'nBdry',  [], ...
+            'tBdry',  [], ...
+            'kappa',  [] );
     end
-
-    if ~isfield(config, 'bottom') || isempty(config.bottom) || ...
-            ~isfield(config.bottom, 'r') || ~isfield(config.bottom, 'z')
+    hit = emptyHit;
+    if ~bottomEnabled
         return;
     end
 
@@ -60,11 +72,8 @@ function hit = local_find_bottom_hit(y, yTry, ds_left, config)
         return;
     end
 
-    bottom = config.bottom;
-    nSeg = numel(bottom.r) - 1;
-    if nSeg < 1
-        return;
-    end
+    bottom = cachedBottom;
+    nSeg = cachedNSeg;
 
     % -------------------------------------------------------------
     % Search the earliest intersection with the bottom polyline
@@ -91,64 +100,39 @@ function hit = local_find_bottom_hit(y, yTry, ds_left, config)
         return;
     end
 
-    for segId = segStart:segEnd
-        r1 = bottom.r(segId);
-        z1 = bottom.z(segId);
-        r2 = bottom.r(segId + 1);
-        z2 = bottom.z(segId + 1);
+    % 优化：向量化底部分段交叉检测，消除候选分段上的标量循环
+    segRange = segStart:segEnd;
+    r1v = bottom.r(segRange);
+    z1v = bottom.z(segRange);
+    r2v = bottom.r(segRange + 1);
+    z2v = bottom.z(segRange + 1);
 
-        % -------------------------
-        % Fast bbox rejection
-        % -------------------------
-        seg_rmin = min(r1, r2);
-        seg_rmax = max(r1, r2);
-        seg_zmin = min(z1, z2);
-        seg_zmax = max(z1, z2);
+    seg_rminv = min(r1v, r2v);
+    seg_rmaxv = max(r1v, r2v);
+    seg_zminv = min(z1v, z2v);
+    seg_zmaxv = max(z1v, z2v);
 
-        if (ray_rmax < seg_rmin - tolBox) || (ray_rmin > seg_rmax + tolBox) || ...
-           (ray_zmax < seg_zmin - tolBox) || (ray_zmin > seg_zmax + tolBox)
-            continue;
-        end
+    bboxOk = ~((ray_rmax < seg_rminv - tolBox) | (ray_rmin > seg_rmaxv + tolBox) | ...
+                (ray_zmax < seg_zminv - tolBox) | (ray_zmin > seg_zmaxv + tolBox));
 
-        % -------------------------
-        % Segment-segment intersection
-        %
-        % Ray step    : A + t * v,  t in [0,1]
-        % Bottom facet: C + u * w,  u in [0,1]
-        % -------------------------
-        wr = r2 - r1;
-        wz = z2 - z1;
-
-        rhs_r = r1 - rA;
-        rhs_z = z1 - zA;
-
-        denom = vr * wz - vz * wr;
-
-        % 平行/近似平行：先跳过
-        % （初版足够；后面若要处理共线特殊情形再补）
-        if abs(denom) < tolParallel
-            continue;
-        end
-
-        t = (rhs_r * wz - rhs_z * wr) / denom;
-        u = (rhs_r * vz - rhs_z * vr) / denom;
-
-        % 命中判据：
-        % 1) t 要在当前小步内部
-        % 2) u 要在该 bottom facet 内
-        %
-        % 这里要求 t > tolParam 而不是 t >= 0，
-        % 是为了避免刚在边界反射后，又因为数值舍入立刻“再次撞到同一点”
-        if (t > tolParam) && (t <= 1.0 + tolParam) && ...
-           (u >= -tolParam) && (u <= 1.0 + tolParam)
-
-            if t < tBest
-                tClamped = min(max(t, 0.0), 1.0);
-                tBest = tClamped;
-                segBest = segId;
-                rBest = rA + tClamped * vr;
-                zBest = zA + tClamped * vz;
-            end
+    if any(bboxOk)
+        r1c = r1v(bboxOk);  z1c = z1v(bboxOk);
+        wrv = r2v(bboxOk) - r1c;  wzv = z2v(bboxOk) - z1c;
+        rhs_rv = r1c - rA;  rhs_zv = z1c - zA;
+        denomv = vr * wzv - vz * wrv;
+        nonPar = abs(denomv) >= tolParallel;
+        tv = (rhs_rv .* wzv - rhs_zv .* wrv) ./ denomv;
+        uv = (rhs_rv .* vz  - rhs_zv .* vr)  ./ denomv;
+        hitMask = nonPar & (tv > tolParam) & (tv <= 1.0 + tolParam) & ...
+                  (uv >= -tolParam) & (uv <= 1.0 + tolParam);
+        if any(hitMask)
+            tv(~hitMask) = Inf;
+            [tRaw, bestLocal] = min(tv);
+            tBest = min(max(tRaw, 0.0), 1.0);
+            segCands = segRange(bboxOk);
+            segBest = segCands(bestLocal);
+            rBest = rA + tBest * vr;
+            zBest = zA + tBest * vz;
         end
     end
 
