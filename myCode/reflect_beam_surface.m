@@ -3,6 +3,13 @@ function yOut = reflect_beam_surface(yIn, config)
 % State:
 %   y = [r; z; pr; pz; Re(P); Im(P); Re(Q); Im(Q); tau; Re(G); Im(G)]
 
+% 优化：缓存曲率修正系数，消除每次反射的多级结构体字段访问
+% 切换 config 时可调用 clear reflect_beam_surface 重置缓存
+persistent cachedCurvFactor
+if isempty(cachedCurvFactor)
+    cachedCurvFactor = config.beam.model.curvature_factor;
+end
+
 r   = yIn(1);
 pr  = yIn(3);
 pz  = yIn(4);
@@ -33,7 +40,7 @@ cnjump = -cnjump;
 RM = Tg / Th;
 RN = RM * (2.0 * cnjump - RM * csjump) / cSurf;
 RN = -RN;
-RN = config.beam.model.curvature_factor * RN;
+RN = cachedCurvFactor * RN;
 
 prNew = pr;
 pzNew = -pz;

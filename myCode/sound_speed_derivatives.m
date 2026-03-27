@@ -18,8 +18,29 @@ function [c, cr, cz, crr, crz, czz] = sound_speed_derivatives(config, r, z)
 % and the discontinuity of cz at internal interfaces is handled separately
 % by apply_ssp_interface_jump_2d().
 
-profileType = lower(config.env.profile.type);
+% 优化：用 persistent 缓存 profileType/tabMode/precomputed 标志，
+% 消除每次调用重复执行的 lower()、isfield() 等固定开销（每步被调用 3-5 次）。
+% 同一 MATLAB 会话中切换 config 时，可调用 clear sound_speed_derivatives 重置缓存。
+persistent cacheProfileType cacheTabMode cacheUsePrecomputed
+if isempty(cacheProfileType)
+    cacheProfileType    = lower(config.env.profile.type);
+    cacheTabMode        = local_get_tabular_mode(config);
+    cacheUsePrecomputed = strcmp(cacheTabMode, 'piecewise_linear') && ...
+        isfield(config.env.profile.params, 'pwl_zw')    && ...
+        isfield(config.env.profile.params, 'pwl_cw')    && ...
+        isfield(config.env.profile.params, 'pwl_slope') && ...
+        isfield(config.env.profile.params, 'pwl_nseg');
+end
+profileType = cacheProfileType;
 params = config.env.profile.params;
+
+% 位置缓存：消除 local_predict_event 与积分器首步在相同 (r,z) 处的重复计算
+persistent posR posZ posC posCr posCz posCrr posCrz posCzz
+if isscalar(r) && isscalar(z) && ~isempty(posR) && r == posR && z == posZ
+    c = posC; cr = posCr; cz = posCz;
+    crr = posCrr; crz = posCrz; czz = posCzz;
+    return;
+end
 
 switch profileType
     case 'downward'
@@ -58,27 +79,20 @@ switch profileType
         end
 
     case 'tabular'
-        tabMode = local_get_tabular_mode(config);
-
-        switch tabMode
-            case 'piecewise_linear'
-                if isfield(params, 'pwl_zw') && isfield(params, 'pwl_cw') && ...
-                        isfield(params, 'pwl_slope') && isfield(params, 'pwl_nseg')
-                    [c, cz, czz] = local_tabular_piecewise_linear_precomputed( ...
-                        params.pwl_zw, params.pwl_cw, params.pwl_slope, params.pwl_nseg, z);
-                else
-                    [c, cz, czz] = local_tabular_piecewise_linear( ...
-                        config.env.profile.zw, config.env.profile.cw, z);
-                end
-
-            case {'pp_spline', 'spline_pp', 'pp'}
-                zQuery = min(max(z, min(config.env.profile.zw)), max(config.env.profile.zw));
-                c   = ppval(params.ppc,   zQuery);
-                cz  = ppval(params.ppcz,  zQuery);
-                czz = ppval(params.ppczz, zQuery);
-
-            otherwise
-                error('Unsupported tabular_mode: %s', tabMode);
+        % 优化：tabMode 和 precomputed 标志已在首次调用时缓存，无需重复检查
+        if cacheUsePrecomputed
+            [c, cz, czz] = local_tabular_piecewise_linear_precomputed( ...
+                params.pwl_zw, params.pwl_cw, params.pwl_slope, params.pwl_nseg, z);
+        elseif strcmp(cacheTabMode, 'piecewise_linear')
+            [c, cz, czz] = local_tabular_piecewise_linear( ...
+                config.env.profile.zw, config.env.profile.cw, z);
+        elseif any(strcmp(cacheTabMode, {'pp_spline', 'spline_pp', 'pp'}))
+            zQuery = min(max(z, min(config.env.profile.zw)), max(config.env.profile.zw));
+            c   = ppval(params.ppc,   zQuery);
+            cz  = ppval(params.ppcz,  zQuery);
+            czz = ppval(params.ppczz, zQuery);
+        else
+            error('Unsupported tabular_mode: %s', cacheTabMode);
         end
 
     otherwise
@@ -88,6 +102,13 @@ end
 cr  = zeros(size(r));
 crr = zeros(size(r));
 crz = zeros(size(r));
+
+% 更新位置缓存（仅标量查询）
+if isscalar(r) && isscalar(z)
+    posR = r; posZ = z;
+    posC = c; posCr = cr; posCz = cz;
+    posCrr = crr; posCrz = crz; posCzz = czz;
+end
 end
 
 % =========================================================================

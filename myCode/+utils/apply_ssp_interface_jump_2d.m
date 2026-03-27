@@ -3,23 +3,34 @@ function yOut = apply_ssp_interface_jump_2d(yIn, hit, config)
 
 yOut = yIn;
 
-if ~local_jump_enabled(config)
-    return;
+% 优化：缓存 jump 启用标志及 zw/cw 数组，消除每次界面穿越的 isfield/strcmpi 检查与数组拷贝
+% 切换 config 时可调用 clear utils.apply_ssp_interface_jump_2d 重置缓存
+persistent jumpApplicable cachedZw cachedCw cachedNZw
+if isempty(jumpApplicable)
+    jumpApplicable = local_jump_enabled(config) && ...
+        strcmpi(config.env.profile.type, 'tabular') && ...
+        strcmpi(local_get_tabular_mode(config), 'piecewise_linear');
+    if jumpApplicable
+        cachedZw  = config.env.profile.zw(:);
+        cachedCw  = config.env.profile.cw(:);
+        cachedNZw = numel(cachedZw);
+    else
+        cachedZw  = [];
+        cachedCw  = [];
+        cachedNZw = 0;
+    end
 end
-if ~strcmpi(config.env.profile.type, 'tabular')
-    return;
-end
-if ~strcmpi(local_get_tabular_mode(config), 'piecewise_linear')
+if ~jumpApplicable
     return;
 end
 if ~isfield(hit, 'interfaceIndex') || isempty(hit.interfaceIndex) || ~isfinite(hit.interfaceIndex)
     return;
 end
 
-zw = config.env.profile.zw(:);
-cw = config.env.profile.cw(:);
+zw = cachedZw;
+cw = cachedCw;
 j = hit.interfaceIndex;
-if j <= 1 || j >= numel(zw)
+if j <= 1 || j >= cachedNZw
     return;
 end
 
